@@ -30,12 +30,21 @@ android {
 
     signingConfigs {
         create("release") {
-            val keystoreFile = rootProject.file("release.jks")
+            val envKeystore = System.getenv("REALBUDS_KEYSTORE")
+            val keystoreFile = if (!envKeystore.isNullOrEmpty()) file(envKeystore) else rootProject.file("release.jks")
             if (keystoreFile.exists()) {
                 storeFile = keystoreFile
-                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "Air7ReleasePass!"
-                keyAlias = System.getenv("KEY_ALIAS") ?: "realbuds_key"
-                keyPassword = System.getenv("KEY_PASSWORD") ?: "Air7ReleasePass!"
+                storePassword = System.getenv("REALBUDS_KEYSTORE_PASSWORD")
+                    ?: System.getenv("KEYSTORE_PASSWORD")
+                    ?: "Air7ReleasePass!"
+                keyAlias = System.getenv("REALBUDS_KEY_ALIAS")
+                    ?: System.getenv("KEY_ALIAS")
+                    ?: "realbuds_key"
+                keyPassword = System.getenv("REALBUDS_KEY_PASSWORD")
+                    ?: System.getenv("KEY_PASSWORD")
+                    ?: "Air7ReleasePass!"
+                enableV1Signing = true
+                enableV2Signing = true
             }
         }
     }

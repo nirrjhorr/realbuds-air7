@@ -1,5 +1,6 @@
 # --- Build output ---
 build/
+release/
 *.apk
 *.aab
 *.ap_
