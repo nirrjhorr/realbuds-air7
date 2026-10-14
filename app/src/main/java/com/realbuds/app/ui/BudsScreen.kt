@@ -1,7 +1,20 @@
 package com.realbuds.app.ui
 
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.AnimatedVisibility
@@ -390,6 +403,39 @@ private fun TabScroll(content: @Composable ColumnScope.() -> Unit) {
     }
 }
 
+/**
+ * Reactive flow monitoring Bluetooth adapter state changes (e.g. from quick settings/status bar).
+ */
+fun Context.bluetoothStateFlow(): Flow<Boolean> = callbackFlow {
+    val manager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+    val adapter = manager?.adapter ?: BluetoothAdapter.getDefaultAdapter()
+    trySend(adapter?.isEnabled == true)
+
+    val receiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                val isEnabled = state == BluetoothAdapter.STATE_ON
+                trySend(isEnabled)
+            }
+        }
+    }
+
+    val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+    ContextCompat.registerReceiver(
+        this@bluetoothStateFlow,
+        receiver,
+        filter,
+        ContextCompat.RECEIVER_EXPORTED,
+    )
+
+    awaitClose {
+        try {
+            unregisterReceiver(receiver)
+        } catch (_: Exception) {}
+    }
+}
+
 @Composable
 private fun ConnectScreen(
     vm: BudsViewModel,
@@ -398,6 +444,33 @@ private fun ConnectScreen(
     onRefresh: () -> Unit,
 ) {
     val devices by vm.devices.collectAsState()
+    val context = LocalContext.current
+    val isBtEnabled by remember(context) { context.bluetoothStateFlow() }
+        .collectAsState(
+            initial = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter?.isEnabled
+                ?: BluetoothAdapter.getDefaultAdapter()?.isEnabled == true
+        )
+
+    val enableBtLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { /* Bluetooth state updates reactively via bluetoothStateFlow */ }
+
+    val onEnableBluetooth = {
+        try {
+            enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+        } catch (_: Exception) {
+            try {
+                context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+            } catch (_: Exception) {}
+        }
+    }
+
+    // Auto-refresh paired devices immediately when Bluetooth turns on
+    LaunchedEffect(isBtEnabled) {
+        if (isBtEnabled) {
+            onRefresh()
+        }
+    }
 
     TabScroll {
         Column(
@@ -431,14 +504,27 @@ private fun ConnectScreen(
             )
         }
 
-        val btAdapter = remember { BluetoothAdapter.getDefaultAdapter() }
-        val isBtEnabled = btAdapter?.isEnabled == true
         if (!isBtEnabled) {
             TintedCard(
                 title = "Bluetooth is turned off",
                 tint = CardTints.neutral,
                 accent = SignalCoral2,
                 icon = Icons.Default.BluetoothDisabled,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .clickable(onClick = onEnableBluetooth),
+                trailing = {
+                    Text(
+                        "Turn on",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .clickable(onClick = onEnableBluetooth)
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                },
             ) {
                 Text(
                     "Please enable Bluetooth in your device settings to connect.",
@@ -446,83 +532,83 @@ private fun ConnectScreen(
                     color = MaterialTheme.colorScheme.onSurface,
                 )
             }
-        }
-
-        if (state == ConnState.CONNECTING) {
-            LinearProgressIndicator(
-                Modifier.fillMaxWidth().clip(CircleShape),
-                color = MaterialTheme.colorScheme.primary,
-                trackColor = LocalGlass.current.fill,
-            )
-        }
-
-        TintedCard(
-            title = "Paired earbuds",
-            tint = CardTints.audio,
-            accent = SignalLime,
-            icon = Icons.Default.Cable,
-            trailing = {
-                Text(
-                    "Scan",
-                    style = MaterialTheme.typography.labelSmall,
+        } else {
+            if (state == ConnState.CONNECTING) {
+                LinearProgressIndicator(
+                    Modifier.fillMaxWidth().clip(CircleShape),
                     color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .noRippleClick(onRefresh)
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    trackColor = LocalGlass.current.fill,
                 )
-            },
-        ) {
-            if (devices.isEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        "Nothing paired yet",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Text(
-                        "Pair your earbuds in Android Bluetooth settings, then grant this " +
-                            "app the Bluetooth permission.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
             }
-            devices.forEach { d ->
-                PressableGlass(
-                    onClick = { vm.connect(d) },
-                    shape = RoundedCornerShape(18.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier
-                                .size(42.dp)
-                                .clip(RoundedCornerShape(13.dp))
-                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                Icons.Outlined.Album,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(20.dp),
-                            )
-                        }
-                        Spacer(Modifier.width(14.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                d.name,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                            MonoText(d.mac, MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
+
+            TintedCard(
+                title = "Paired earbuds",
+                tint = CardTints.audio,
+                accent = SignalLime,
+                icon = Icons.Default.Cable,
+                trailing = {
+                    Text(
+                        "Scan",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .noRippleClick(onRefresh)
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                },
+            ) {
+                if (devices.isEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            "Connect",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary,
+                            "Nothing paired yet",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
                         )
+                        Text(
+                            "Pair your earbuds in Android Bluetooth settings, then grant this " +
+                                "app the Bluetooth permission.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                devices.forEach { d ->
+                    PressableGlass(
+                        onClick = { vm.connect(d) },
+                        shape = RoundedCornerShape(18.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(42.dp)
+                                    .clip(RoundedCornerShape(13.dp))
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    Icons.Outlined.Album,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                            Spacer(Modifier.width(14.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    d.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                MonoText(d.mac, MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Text(
+                                "Connect",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
                     }
                 }
             }
