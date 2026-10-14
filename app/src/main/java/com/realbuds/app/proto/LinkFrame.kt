@@ -44,16 +44,17 @@ object LinkFrame {
         return out
     }
 
-    /** Decode the varint at [offset]; returns value to byteCount. */
-    fun decodeVarint(data: ByteArray, offset: Int): Pair<Int, Int> {
+    /** Decode the varint at [offset]; returns value to byteCount, or null if truncated/malformed. */
+    fun decodeVarint(data: ByteArray, offset: Int): Pair<Int, Int>? {
         var value = 0
         var i = 0
-        while (true) {
+        while (offset + i < data.size && i < 5) {
             val b = data[offset + i].toInt()
             value = value or ((b and 0x7F) shl (7 * i))
             i++
             if ((b and 0x80) == 0) return value to i
         }
+        return null
     }
 
     /**
@@ -127,7 +128,7 @@ object LinkFrame {
         if (data.size < 4) return null
         if (data[0] != Protocol.SOF) return null
 
-        val (linkLen, varLen) = decodeVarint(data, 1)
+        val (linkLen, varLen) = decodeVarint(data, 1) ?: return null
         val ctrlIdx = 1 + varLen
         if (ctrlIdx >= data.size) return null
 

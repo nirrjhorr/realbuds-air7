@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothSocket
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -119,6 +120,8 @@ class BudsClient {
     private var input: InputStream? = null
     private val seq = TransferIdCounter()
     private val writeLock = Mutex()
+    private val connectLock = Mutex()
+    private var readerJob: Job? = null
 
     private val _deviceName = MutableStateFlow<String?>(null)
     val deviceName: StateFlow<String?> = _deviceName.asStateFlow()
@@ -130,38 +133,43 @@ class BudsClient {
         }
 
     suspend fun connect(device: BluetoothDevice): Result<Unit> = withContext(Dispatchers.IO) {
-        // Guard: abort before touching the socket if Bluetooth is off.
-        val adapter = BluetoothAdapter.getDefaultAdapter()
-        if (adapter == null || !adapter.isEnabled) {
-            emitLog(false, "connect aborted: Bluetooth disabled", "")
-            errors.bluetoothOff("Please turn on Bluetooth in settings to connect.")
-            _state.value = ConnState.DISCONNECTED
-            return@withContext Result.failure(IOException("Bluetooth is turned off"))
-        }
+        connectLock.withLock {
+            if (_state.value == ConnState.CONNECTING || _state.value == ConnState.CONNECTED) {
+                return@withContext Result.success(Unit)
+            }
+            // Guard: abort before touching the socket if Bluetooth is off.
+            val adapter = BluetoothAdapter.getDefaultAdapter()
+            if (adapter == null || !adapter.isEnabled) {
+                emitLog(false, "connect aborted: Bluetooth disabled", "")
+                errors.bluetoothOff("Please turn on Bluetooth in settings to connect.")
+                _state.value = ConnState.DISCONNECTED
+                return@withContext Result.failure(IOException("Bluetooth is turned off"))
+            }
 
-        disconnect()
-        _state.value = ConnState.CONNECTING
-        _deviceName.value = device.name
-        try {
-            val s = device.createRfcommSocketToServiceRecord(UUID.fromString(Protocol.SPP_UUID))
-            s.connect()
-            socket = s
-            out = s.outputStream
-            input = s.inputStream
-            _state.value = ConnState.CONNECTED
-            emitLog(false, "connected to ${device.name}", "")
-            startReader()
-            scope.launch { handshake() }
-            Result.success(Unit)
-        } catch (e: IOException) {
-            emitLog(false, "connect failed: ${e.message}", "")
-            errors.deviceUnavailable(
-                title = "Device unavailable",
-                message = "Make sure your realme Buds are out of the case and nearby."
-            )
-            _state.value = ConnState.DISCONNECTED
-            cleanup()
-            Result.failure(e)
+            disconnect()
+            _state.value = ConnState.CONNECTING
+            _deviceName.value = device.name
+            try {
+                val s = device.createRfcommSocketToServiceRecord(UUID.fromString(Protocol.SPP_UUID))
+                s.connect()
+                socket = s
+                out = s.outputStream
+                input = s.inputStream
+                _state.value = ConnState.CONNECTED
+                emitLog(false, "connected to ${device.name}", "")
+                startReader()
+                scope.launch { handshake() }
+                Result.success(Unit)
+            } catch (e: IOException) {
+                emitLog(false, "connect failed: ${e.message}", "")
+                errors.deviceUnavailable(
+                    title = "Device unavailable",
+                    message = "Make sure your realme Buds are out of the case and nearby."
+                )
+                _state.value = ConnState.DISCONNECTED
+                cleanup()
+                Result.failure(e)
+            }
         }
     }
 
@@ -173,6 +181,8 @@ class BudsClient {
     }
 
     private fun cleanup() {
+        readerJob?.cancel()
+        readerJob = null
         try { socket?.close() } catch (_: IOException) {}
         socket = null; out = null; input = null
     }
@@ -404,7 +414,8 @@ class BudsClient {
     // ---- incoming ----
 
     private fun startReader() {
-        scope.launch {
+        readerJob?.cancel()
+        readerJob = scope.launch {
             val buf = ByteArray(4096)
             var pending = ByteArray(0)
             reassembler.reset()
